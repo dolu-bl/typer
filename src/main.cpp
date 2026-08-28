@@ -78,7 +78,6 @@ int main(int argc, char* argv[])
         Typer typer;
         typer.run(filepath, content, offset, reset);
 
-        std::cout << "Прогресс сохранён. Остановились на позиции " << offset << "\n";
         return EXIT_SUCCESS;
     }
     catch (const std::exception& e)

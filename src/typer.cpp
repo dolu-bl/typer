@@ -1,5 +1,8 @@
+#include <chrono>
 #include <cstdlib>
 #include <fstream>
+#include <iomanip>
+#include <iostream>
 #include <unistd.h>
 
 #include <nlohmann/json.hpp>
@@ -56,8 +59,7 @@ void Typer::draw(const std::string& text, size_t pos, bool error)
 {
     term.clearScreen();
     int rows = term.getRows(), cols = term.getCols();
-    
-    // Находим начало текущей строки
+
     size_t start = pos;
     while (start > 0 && text[start - 1] != '\n')
         --start;
@@ -110,6 +112,36 @@ void Typer::draw(const std::string& text, size_t pos, bool error)
     term.moveCursor(cursorRow + 1, cursorCol + 1);
 }
 
+// -------- Вывод статистики ------------------------------------------------
+void Typer::printStats() const
+{
+    if (!m_started)
+    {
+        std::cout << "Нет данных для статистики (ни одного символа не введено).\n";
+        return;
+    }
+
+    const auto endTime = std::chrono::steady_clock::now();
+    const auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(endTime - m_startTime).count();
+    const double minutes = elapsed / 60.0;
+
+    const size_t total = m_correctChars + m_errors;
+    const double accuracy = (total > 0) ? (static_cast<double>(m_correctChars) / total * 100.0) : 0.0;
+
+    // WPM: количество слов (1 слово = 5 символов) в минуту
+    const double wpm = (minutes > 0) ? (m_correctChars / 5.0 / minutes) : 0.0;
+
+    std::cout
+        << "\n========= СТАТИСТИКА =========\n"
+        << "  Время работы:     " << elapsed << " сек.\n"
+        << "  Правильных симв.: " << m_correctChars << "\n"
+        << "  Ошибок:           " << m_errors << "\n"
+        << "  Точность:         " << std::fixed << std::setprecision(1) << accuracy << "%\n"
+        << "  Скорость (WPM):   " << std::fixed << std::setprecision(1) << wpm << "\n"
+        << "===============================\n";
+}
+
+// -------- Основной цикл ------------------------------------------------
 void Typer::run(
     const std::string& filepath,
     const std::string& content,
@@ -122,6 +154,12 @@ void Typer::run(
     else
         offset = 0;
 
+    // Сброс статистики при новом запуске
+    m_totalChars = 0;
+    m_correctChars = 0;
+    m_errors = 0;
+    m_started = false;
+
     term.enableRaw();
     term.clearScreen();
 
@@ -133,8 +171,8 @@ void Typer::run(
         draw(content, pos, error);
         char ch = term.getChar();
 
-        if (ch == 27)
-            break; // ESC
+        if (ch == 27) // ESC
+            break;
 
         if (ch == 127 || ch == '\b')
         {
@@ -152,19 +190,42 @@ void Typer::run(
             continue;
         }
 
+        // --- Обычный ввод символа ---
+        if (!m_started)
+        {
+            m_startTime = std::chrono::steady_clock::now();
+            m_started = true;
+        }
+
+        ++m_totalChars;
         if (pos < content.size() && ch == content[pos])
         {
+            ++m_correctChars;
             error = false;
             ++pos;
         }
         else
         {
+            ++m_errors;
             error = true;
         }
     }
 
+    // Сохраняем прогресс
     saveState(filepath, pos);
     offset = pos;
+
+    // Восстанавливаем терминал и очищаем экран
     term.disableRaw();
     term.clearScreen();
+    std::cout << "\033[H"; // курсор в левый верхний угол
+
+    // Сообщение о сохранении (теперь оно первым)
+    std::cout << "Прогресс сохранён. Остановились на позиции " << pos << "\n\n";
+
+    // Статистика
+    printStats();
+
+    // Принудительный сброс буфера
+    std::cout.flush();
 }
