@@ -54,11 +54,58 @@ void Terminal::resetColor()
     write(STDOUT_FILENO, "\033[0m", 4);
 }
 
-char Terminal::getChar()
+void Terminal::hideCursor()
 {
-    char ch;
-    read(STDIN_FILENO, &ch, 1);
-    return ch;
+    write(STDOUT_FILENO, "\033[?25l", 6);
+}
+
+void Terminal::showCursor()
+{
+    write(STDOUT_FILENO, "\033[?25h", 6);
+}
+
+char32_t Terminal::getChar()
+{
+    // Читаем первый байт
+    unsigned char first;
+    if (read(STDIN_FILENO, &first, 1) != 1)
+        return 0;
+
+    // Определяем длину UTF-8 последовательности
+    size_t len;
+    if ((first & 0x80) == 0) // 0xxxxxxx
+        len = 1;
+    else if ((first & 0xE0) == 0xC0) // 110xxxxx
+        len = 2;
+    else if ((first & 0xF0) == 0xE0) // 1110xxxx
+        len = 3;
+    else if ((first & 0xF8) == 0xF0) // 11110xxx
+        len = 4;
+    else
+        return 0; // невалидный
+
+    unsigned char buf[4] = { first, 0, 0, 0 };
+    for (size_t i = 1; i < len; ++i)
+    {
+        if (read(STDIN_FILENO, &buf[i], 1) != 1)
+            return 0;
+        // Проверяем, что это continuation byte (10xxxxxx)
+        if ((buf[i] & 0xC0) != 0x80)
+            return 0;
+    }
+
+    // Декодируем в char32_t
+    char32_t cp = 0;
+    if (len == 1)
+        cp = first;
+    else if (len == 2)
+        cp = ((first & 0x1F) << 6) | (buf[1] & 0x3F);
+    else if (len == 3)
+        cp = ((first & 0x0F) << 12) | ((buf[1] & 0x3F) << 6) | (buf[2] & 0x3F);
+    else if (len == 4)
+        cp = ((first & 0x07) << 18) | ((buf[1] & 0x3F) << 12) | ((buf[2] & 0x3F) << 6) | (buf[3] & 0x3F);
+
+    return cp;
 }
 
 void Terminal::updateSize()

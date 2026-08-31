@@ -11,12 +11,66 @@
 
 using json = nlohmann::json;
 
+// -------- Вспомогательные функции для состояния --------
 static std::string statePath()
 {
     const char* home = getenv("HOME");
     return std::string(home ? home : ".") + "/.typer_sessions.json";
 }
 
+// -------- Декодирование UTF-8 --------
+void Typer::decodeUtf8(
+    const std::string& utf8,
+    std::u32string& outText,
+    std::vector<size_t>& outByteOffsets
+)
+{
+    outText.clear();
+    outByteOffsets.clear();
+    outByteOffsets.reserve(utf8.size() + 1);
+
+    size_t i = 0;
+    while (i < utf8.size())
+    {
+        unsigned char c = static_cast<unsigned char>(utf8[i]);
+        size_t len;
+        if ((c & 0x80) == 0)
+            len = 1;
+        else if ((c & 0xE0) == 0xC0)
+            len = 2;
+        else if ((c & 0xF0) == 0xE0)
+            len = 3;
+        else if ((c & 0xF8) == 0xF0)
+            len = 4;
+        else
+        {
+            // Некорректный байт, пропускаем
+            ++i;
+            continue;
+        }
+
+        if (i + len > utf8.size())
+            break;
+
+        // Декодируем
+        char32_t cp = 0;
+        if (len == 1)
+            cp = c;
+        else if (len == 2)
+            cp = ((c & 0x1F) << 6) | (utf8[i + 1] & 0x3F);
+        else if (len == 3)
+            cp = ((c & 0x0F) << 12) | ((utf8[i + 1] & 0x3F) << 6) | (utf8[i + 2] & 0x3F);
+        else if (len == 4)
+            cp = ((c & 0x07) << 18) | ((utf8[i + 1] & 0x3F) << 12) | ((utf8[i + 2] & 0x3F) << 6) | (utf8[i + 3] & 0x3F);
+
+        outByteOffsets.push_back(i);
+        outText.push_back(cp);
+        i += len;
+    }
+    outByteOffsets.push_back(utf8.size()); // смещение конца
+}
+
+// -------- Загрузка/сохранение прогресса --------
 void Typer::loadState(const std::string& filepath, size_t& offset)
 {
     std::ifstream file(statePath());
@@ -55,64 +109,114 @@ void Typer::saveState(const std::string& filepath, size_t offset) const
         out << stateJson.dump(4);
 }
 
-void Typer::draw(const std::string& text, size_t pos, bool error)
+// -------- Отрисовка с буферизацией (без мерцания) --------
+void Typer::draw(size_t pos, bool error)
 {
-    term.clearScreen();
-    int rows = term.getRows(), cols = term.getCols();
+    const int rows = term.getRows();
+    const int cols = term.getCols();
 
+    // Определяем начало видимой области: начало строки, содержащей pos
     size_t start = pos;
-    while (start > 0 && text[start - 1] != '\n')
+    // Ищем предыдущий символ новой строки, но не уходим за 0
+    while (start > 0 && m_text[start - 1] != U'\n')
         --start;
 
-    size_t curRow = 0;
-    size_t curCol = 0;
+    // Вычислим координаты курсора (строка, колонка) относительно начала видимой области
     size_t cursorRow = 0;
     size_t cursorCol = 0;
+    size_t curRow = 0;
+    size_t curCol = 0;
 
-    for (size_t i = start; i < text.size() && curRow < rows; ++i)
+    // Пройдём по символам от start до pos, чтобы узнать позицию курсора
+    for (size_t i = start; i < pos && i < m_text.size(); ++i)
     {
-        char ch = text[i];
-        if (ch == '\n' || curCol >= cols - 1)
+        char32_t ch = m_text[i];
+        if (ch == U'\n' || curCol >= static_cast<size_t>(cols - 1))
         {
-            curRow++;
+            ++curRow;
             curCol = 0;
-            if (ch == '\n')
+            if (ch == U'\n')
                 continue;
         }
+        ++curCol;
+    }
+    cursorRow = curRow;
+    cursorCol = curCol;
 
-        term.moveCursor(curRow + 1, curCol + 1);
-        if (i < pos)
+    // Подготовим выходной буфер
+    std::string output;
+    output.reserve(1024); // примерный размер, можно больше
+
+    // Скрываем курсор на время обновления
+    output += "\033[?25l";
+    // Очищаем экран
+    output += "\033[2J\033[H";
+
+    // --- Отрисовка текста с цветами ---
+    // Пройдём от start до конца видимой области (rows строк)
+    size_t idx = start;
+    size_t row = 0;
+    size_t col = 0;
+    bool done = false;
+
+    while (row < static_cast<size_t>(rows) && idx < m_text.size())
+    {
+        // Для каждого символа решаем, какой цвет использовать
+        bool isBefore = (idx < pos);
+        bool isCurrent = (idx == pos);
+
+        // Устанавливаем цвет
+        if (isBefore)
+            output += "\033[32m"; // зелёный
+        else if (isCurrent && error)
+            output += "\033[41;37m"; // красный фон, белый текст
+        else
+            output += "\033[0m"; // обычный (будет сброшен после символа)
+
+        // Добавляем символ (в UTF-8)
+        size_t byteStart = m_byteOffsets[idx];
+        size_t byteEnd = m_byteOffsets[idx + 1];
+        output.append(m_utf8, byteStart, byteEnd - byteStart);
+
+        // Сбрасываем цвет после каждого символа (кроме обычного)
+        if (isBefore || (isCurrent && error))
+            output += "\033[0m";
+        // Если символ обычный, цвет уже сброшен, но ничего страшного
+
+        // Переходим на следующую позицию
+        char32_t ch = m_text[idx];
+        if (ch == U'\n' || col >= static_cast<size_t>(cols - 1))
         {
-            term.setColor(2, 0); // зелёный текст на чёрном фоне
-        }
-        else if (i == pos && error)
-        {
-            term.setColor(7, 1); // белый текст на красном фоне
+            ++row;
+            col = 0;
+            if (ch == U'\n')
+            {
+                ++idx;
+                continue;
+            }
         }
         else
         {
-            term.resetColor();
+            ++col;
         }
-        write(STDOUT_FILENO, &ch, 1);
-
-        if (i == pos)
-        {
-            cursorRow = curRow;
-            cursorCol = curCol;
-        }
-        curCol++;
+        ++idx;
     }
 
-    term.resetColor();
-    if (pos >= text.size())
-    {
-        cursorRow = rows - 1;
-        cursorCol = cols - 1;
-    }
-    term.moveCursor(cursorRow + 1, cursorCol + 1);
+    // После цикла устанавливаем курсор в позицию ввода (с учётом, что нумерация строк и колонок с 1)
+    int targetRow = static_cast<int>(cursorRow + 1);
+    int targetCol = static_cast<int>(cursorCol + 1);
+    char buf[32];
+    snprintf(buf, sizeof(buf), "\033[%d;%dH", targetRow, targetCol);
+    output += buf;
+
+    // Показываем курсор
+    output += "\033[?25h";
+
+    // Один вызов для всей отрисовки
+    write(STDOUT_FILENO, output.data(), output.size());
 }
 
-// -------- Вывод статистики ------------------------------------------------
+// -------- Вывод статистики --------
 void Typer::printStats() const
 {
     if (!m_started)
@@ -141,20 +245,24 @@ void Typer::printStats() const
         << "===============================\n";
 }
 
-// -------- Основной цикл ------------------------------------------------
+// -------- Основной цикл --------
 void Typer::run(
     const std::string& filepath,
-    const std::string& content,
+    const std::string& utf8Content,
     size_t& offset,
     bool reset
 )
 {
+    // Декодируем содержимое файла
+    decodeUtf8(utf8Content, m_text, m_byteOffsets);
+    m_utf8 = utf8Content;
+
     if (!reset)
         loadState(filepath, offset);
     else
         offset = 0;
 
-    // Сброс статистики при новом запуске
+    // Сброс статистики
     m_totalChars = 0;
     m_correctChars = 0;
     m_errors = 0;
@@ -166,10 +274,10 @@ void Typer::run(
     size_t pos = offset;
     bool error = false;
 
-    while (pos < content.size())
+    while (pos < m_text.size())
     {
-        draw(content, pos, error);
-        char ch = term.getChar();
+        draw(pos, error);
+        char32_t ch = term.getChar();
 
         if (ch == 27) // ESC
             break;
@@ -198,7 +306,7 @@ void Typer::run(
         }
 
         ++m_totalChars;
-        if (pos < content.size() && ch == content[pos])
+        if (pos < m_text.size() && ch == m_text[pos])
         {
             ++m_correctChars;
             error = false;
@@ -215,17 +323,11 @@ void Typer::run(
     saveState(filepath, pos);
     offset = pos;
 
-    // Восстанавливаем терминал и очищаем экран
     term.disableRaw();
     term.clearScreen();
     std::cout << "\033[H"; // курсор в левый верхний угол
 
-    // Сообщение о сохранении (теперь оно первым)
     std::cout << "Прогресс сохранён. Остановились на позиции " << pos << "\n\n";
-
-    // Статистика
     printStats();
-
-    // Принудительный сброс буфера
     std::cout.flush();
 }

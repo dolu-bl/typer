@@ -14,9 +14,15 @@ public:
     void moveCursor(int row, int col);
     void setColor(int fg, int bg);
     void resetColor();
-    char getChar();
+
+    // Читает один UTF-8 символ и возвращает его кодовую точку
+    char32_t getChar();
+
     int getRows() const;
     int getCols() const;
+
+    void hideCursor();
+    void showCursor();
 
 private:
     void updateSize();
