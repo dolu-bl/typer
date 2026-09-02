@@ -106,7 +106,10 @@ void Typer::saveState(const std::string& filepath, size_t offset) const
     stateJson[filepath] = offset;
     std::ofstream out(statePath());
     if (out.is_open())
+    {
         out << stateJson.dump(4);
+        out.flush(); // убедимся, что данные записаны
+    }
 }
 
 // -------- Отрисовка с буферизацией (без мерцания) --------
@@ -117,35 +120,40 @@ void Typer::draw(size_t pos, bool error)
 
     // Определяем начало видимой области: начало строки, содержащей pos
     size_t start = pos;
-    // Ищем предыдущий символ новой строки, но не уходим за 0
     while (start > 0 && m_text[start - 1] != U'\n')
         --start;
 
-    // Вычислим координаты курсора (строка, колонка) относительно начала видимой области
+    // Вычисляем координаты курсора для позиции pos
     size_t cursorRow = 0;
     size_t cursorCol = 0;
-    size_t curRow = 0;
-    size_t curCol = 0;
-
-    // Пройдём по символам от start до pos, чтобы узнать позицию курсора
-    for (size_t i = start; i < pos && i < m_text.size(); ++i)
     {
-        char32_t ch = m_text[i];
-        if (ch == U'\n' || curCol >= static_cast<size_t>(cols - 1))
+        size_t row = 0;
+        size_t col = 0;
+        for (size_t i = start; i < pos && i < m_text.size(); ++i)
         {
-            ++curRow;
-            curCol = 0;
+            char32_t ch = m_text[i];
             if (ch == U'\n')
-                continue;
+            {
+                ++row;
+                col = 0;
+            }
+            else
+            {
+                ++col;
+                if (col >= static_cast<size_t>(cols))
+                {
+                    ++row;
+                    col = 0;
+                }
+            }
         }
-        ++curCol;
+        cursorRow = row;
+        cursorCol = col;
     }
-    cursorRow = curRow;
-    cursorCol = curCol;
 
     // Подготовим выходной буфер
     std::string output;
-    output.reserve(1024); // примерный размер, можно больше
+    output.reserve(4096); // примерный размер
 
     // Скрываем курсор на время обновления
     output += "\033[?25l";
@@ -153,56 +161,54 @@ void Typer::draw(size_t pos, bool error)
     output += "\033[2J\033[H";
 
     // --- Отрисовка текста с цветами ---
-    // Пройдём от start до конца видимой области (rows строк)
     size_t idx = start;
     size_t row = 0;
     size_t col = 0;
-    bool done = false;
 
     while (row < static_cast<size_t>(rows) && idx < m_text.size())
     {
-        // Для каждого символа решаем, какой цвет использовать
+        char32_t ch = m_text[idx];
+
+        // Определяем цвет
         bool isBefore = (idx < pos);
         bool isCurrent = (idx == pos);
 
-        // Устанавливаем цвет
         if (isBefore)
             output += "\033[32m"; // зелёный
         else if (isCurrent && error)
             output += "\033[41;37m"; // красный фон, белый текст
         else
-            output += "\033[0m"; // обычный (будет сброшен после символа)
+            output += "\033[0m"; // обычный (сброс)
 
         // Добавляем символ (в UTF-8)
         size_t byteStart = m_byteOffsets[idx];
         size_t byteEnd = m_byteOffsets[idx + 1];
         output.append(m_utf8, byteStart, byteEnd - byteStart);
 
-        // Сбрасываем цвет после каждого символа (кроме обычного)
+        // Сбрасываем цвет после каждого специального
         if (isBefore || (isCurrent && error))
             output += "\033[0m";
-        // Если символ обычный, цвет уже сброшен, но ничего страшного
 
-        // Переходим на следующую позицию
-        char32_t ch = m_text[idx];
-        if (ch == U'\n' || col >= static_cast<size_t>(cols - 1))
+        // Обрабатываем перенос строки или по ширине
+        if (ch == U'\n')
         {
             ++row;
             col = 0;
-            if (ch == U'\n')
-            {
-                ++idx;
-                continue;
-            }
         }
         else
         {
             ++col;
+            if (col >= static_cast<size_t>(cols))
+            {
+                ++row;
+                col = 0;
+            }
         }
+
         ++idx;
     }
 
-    // После цикла устанавливаем курсор в позицию ввода (с учётом, что нумерация строк и колонок с 1)
+    // После цикла устанавливаем курсор в позицию ввода
     int targetRow = static_cast<int>(cursorRow + 1);
     int targetCol = static_cast<int>(cursorCol + 1);
     char buf[32];
