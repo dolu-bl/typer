@@ -1,9 +1,11 @@
+#include <algorithm>
 #include <chrono>
 #include <cstdlib>
 #include <fstream>
 #include <iomanip>
 #include <iostream>
 #include <unistd.h>
+#include <vector>
 
 #include <nlohmann/json.hpp>
 
@@ -68,6 +70,35 @@ void Typer::decodeUtf8(
         i += len;
     }
     outByteOffsets.push_back(utf8.size()); // смещение конца
+}
+
+// -------- Преобразование char32_t в UTF-8 --------
+std::string Typer::utf8FromChar32(char32_t cp)
+{
+    std::string result;
+    if (cp <= 0x7F)
+    {
+        result.push_back(static_cast<char>(cp));
+    }
+    else if (cp <= 0x7FF)
+    {
+        result.push_back(0xC0 | ((cp >> 6) & 0x1F));
+        result.push_back(0x80 | (cp & 0x3F));
+    }
+    else if (cp <= 0xFFFF)
+    {
+        result.push_back(0xE0 | ((cp >> 12) & 0x0F));
+        result.push_back(0x80 | ((cp >> 6) & 0x3F));
+        result.push_back(0x80 | (cp & 0x3F));
+    }
+    else if (cp <= 0x10FFFF)
+    {
+        result.push_back(0xF0 | ((cp >> 18) & 0x07));
+        result.push_back(0x80 | ((cp >> 12) & 0x3F));
+        result.push_back(0x80 | ((cp >> 6) & 0x3F));
+        result.push_back(0x80 | (cp & 0x3F));
+    }
+    return result;
 }
 
 // -------- Загрузка/сохранение прогресса --------
@@ -222,7 +253,7 @@ void Typer::draw(size_t pos, bool error)
     write(STDOUT_FILENO, output.data(), output.size());
 }
 
-// -------- Вывод статистики --------
+// -------- Вывод статистики (расширенная) --------
 void Typer::printStats() const
 {
     if (!m_started)
@@ -238,7 +269,6 @@ void Typer::printStats() const
     const size_t total = m_correctChars + m_errors;
     const double accuracy = (total > 0) ? (static_cast<double>(m_correctChars) / total * 100.0) : 0.0;
 
-    // WPM: количество слов (1 слово = 5 символов) в минуту
     const double wpm = (minutes > 0) ? (m_correctChars / 5.0 / minutes) : 0.0;
 
     std::cout
@@ -247,8 +277,62 @@ void Typer::printStats() const
         << "  Правильных симв.: " << m_correctChars << "\n"
         << "  Ошибок:           " << m_errors << "\n"
         << "  Точность:         " << std::fixed << std::setprecision(1) << accuracy << "%\n"
-        << "  Скорость (WPM):   " << std::fixed << std::setprecision(1) << wpm << "\n"
-        << "===============================\n";
+        << "  Скорость (WPM):   " << std::fixed << std::setprecision(1) << wpm << "\n";
+
+    // Расширенная статистика
+    std::cout << "\n--- Расширенная статистика ---\n";
+    std::cout << "  Всего нажатий клавиш: " << m_totalKeystrokes << "\n";
+    std::cout << "  Нажатий Backspace:    " << m_backspaces << "\n";
+    std::cout << "  Макс. последовательность без ошибок: " << m_maxConsecutiveCorrect << " симв.\n";
+
+    // Среднее время между нажатиями
+    if (m_timeIntervalsCount > 0)
+    {
+        double avgMs = static_cast<double>(m_totalTimeBetweenKeys.count()) / m_timeIntervalsCount;
+        std::cout << "  Среднее время между нажатиями: " << std::fixed << std::setprecision(1) << avgMs << " мс\n";
+    }
+    if (m_correctIntervals > 0)
+    {
+        double avgCorrectMs = static_cast<double>(m_correctTimeSum.count()) / m_correctIntervals;
+        std::cout << "  Среднее время для правильных:  " << std::fixed << std::setprecision(1) << avgCorrectMs << " мс\n";
+    }
+    if (m_errorIntervals > 0)
+    {
+        double avgErrorMs = static_cast<double>(m_errorTimeSum.count()) / m_errorIntervals;
+        std::cout << "  Среднее время для ошибочных:   " << std::fixed << std::setprecision(1) << avgErrorMs << " мс\n";
+    }
+
+    // Топ-5 ошибочных символов
+    if (!m_charErrors.empty())
+    {
+        std::vector<std::pair<char32_t, size_t>> errorsVec(m_charErrors.begin(), m_charErrors.end());
+        std::sort(errorsVec.begin(), errorsVec.end(), [](const auto& a, const auto& b)
+                  { return a.second > b.second; });
+
+        std::cout << "\n  Топ-5 символов с наибольшим числом ошибок:\n";
+        size_t count = 0;
+        for (const auto& p : errorsVec)
+        {
+            if (count >= 5)
+                break;
+            char32_t ch = p.first;
+            size_t errs = p.second;
+            size_t totalPresses = m_charPresses.count(ch) ? m_charPresses.at(ch) : 0;
+            double errPercent = (totalPresses > 0) ? (100.0 * errs / totalPresses) : 0.0;
+            std::string chStr = utf8FromChar32(ch);
+            // если символ управляющий (например, табуляция) - заменим
+            if (ch < 0x20)
+            {
+                chStr = "\\x" + std::to_string(static_cast<int>(ch));
+            }
+            std::cout << "    '" << chStr << "' — ошибок: " << errs
+                      << " (из " << totalPresses << " нажатий, "
+                      << std::fixed << std::setprecision(1) << errPercent << "%)\n";
+            ++count;
+        }
+    }
+
+    std::cout << "===============================\n";
 }
 
 // -------- Основной цикл --------
@@ -274,6 +358,22 @@ void Typer::run(
     m_errors = 0;
     m_started = false;
 
+    // Сброс расширенной статистики
+    m_charPresses.clear();
+    m_charErrors.clear();
+    m_charCorrect.clear();
+    m_backspaces = 0;
+    m_totalKeystrokes = 0;
+    m_consecutiveCorrect = 0;
+    m_maxConsecutiveCorrect = 0;
+    m_totalTimeBetweenKeys = std::chrono::milliseconds { 0 };
+    m_timeIntervalsCount = 0;
+    m_correctTimeSum = std::chrono::milliseconds { 0 };
+    m_correctIntervals = 0;
+    m_errorTimeSum = std::chrono::milliseconds { 0 };
+    m_errorIntervals = 0;
+    m_lastKeyTime = std::chrono::steady_clock::now(); // инициализируем, но интервал не будет учтен до второго нажатия
+
     term.enableRaw();
     term.clearScreen();
 
@@ -288,8 +388,22 @@ void Typer::run(
         if (ch == 27) // ESC
             break;
 
+        // Измеряем время с предыдущего нажатия
+        auto now = std::chrono::steady_clock::now();
+        std::chrono::milliseconds diff(0);
+        if (m_totalKeystrokes > 0)
+        {
+            diff = std::chrono::duration_cast<std::chrono::milliseconds>(now - m_lastKeyTime);
+            m_totalTimeBetweenKeys += diff;
+            m_timeIntervalsCount++;
+        }
+        m_lastKeyTime = now;
+
         if (ch == 127 || ch == '\b')
         {
+            ++m_totalKeystrokes;
+            ++m_backspaces;
+            // diff добавляется только к общей сумме, мы уже добавили
             if (pos > offset)
             {
                 if (error)
@@ -305,6 +419,8 @@ void Typer::run(
         }
 
         // --- Обычный ввод символа ---
+        ++m_totalKeystrokes;
+
         if (!m_started)
         {
             m_startTime = std::chrono::steady_clock::now();
@@ -314,14 +430,36 @@ void Typer::run(
         ++m_totalChars;
         if (pos < m_text.size() && ch == m_text[pos])
         {
+            // Правильный символ
             ++m_correctChars;
+            m_charCorrect[ch]++;
+            m_charPresses[ch]++;
             error = false;
             ++pos;
+            ++m_consecutiveCorrect;
+            if (m_consecutiveCorrect > m_maxConsecutiveCorrect)
+                m_maxConsecutiveCorrect = m_consecutiveCorrect;
+            // Добавляем интервал к правильным
+            if (diff.count() > 0)
+            {
+                m_correctTimeSum += diff;
+                m_correctIntervals++;
+            }
         }
         else
         {
+            // Ошибка
             ++m_errors;
+            m_charErrors[ch]++;
+            m_charPresses[ch]++;
             error = true;
+            m_consecutiveCorrect = 0; // сбрасываем последовательность
+            // Добавляем интервал к ошибочным
+            if (diff.count() > 0)
+            {
+                m_errorTimeSum += diff;
+                m_errorIntervals++;
+            }
         }
     }
 
