@@ -74,9 +74,9 @@ int main(int argc, char* argv[])
             std::istreambuf_iterator<char>()
         );
 
-        size_t offset = 0;
+        std::string savedInput; // будет заполнено после run
         Typer typer;
-        typer.run(filepath, content, offset, reset);
+        typer.run(filepath, content, savedInput, reset);
 
         return EXIT_SUCCESS;
     }
