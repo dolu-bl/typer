@@ -145,103 +145,16 @@ void Typer::saveState(const std::string& filepath, const std::u32string& input) 
 // -------- Отрисовка --------
 void Typer::draw()
 {
-    const int rows = term.getRows();
-    const int cols = term.getCols();
+    const int screenRows = term.getRows();
+    const int screenCols = term.getCols();
 
-    // Подготовим выходной буфер
-    std::string output;
-    output.reserve(4096);
-
-    // Скрываем курсор
-    output += "\033[?25l";
-    // Очищаем экран
-    output += "\033[2J\033[H";
-
+    // 1. Вычисляем позицию курсора (по символам '\n')
     size_t inputLen = m_input.size();
-    size_t textLen = m_text.size();
-
-    // Будем рисовать построчно с учётом ширины терминала
-    size_t row = 0, col = 0;
-    size_t idx = 0; // позиция в m_input (и в m_text для сравнения)
-
-    while (row < static_cast<size_t>(rows) && idx < inputLen)
-    {
-        char32_t ch = m_input[idx];
-        bool isCorrect = (idx < textLen && ch == m_text[idx]);
-        // Если idx >= textLen — лишний символ, считаем ошибкой
-        if (idx >= textLen)
-            isCorrect = false;
-
-        if (isCorrect)
-            output += "\033[32m"; // зелёный
-        else
-            output += "\033[41;37m"; // красный фон, белый текст
-
-        // Добавляем символ (в UTF-8)
-        // нужно сгенерировать UTF-8 для ch
-        std::string utf8ch = encodeUtf8(std::u32string(1, ch));
-        output += utf8ch;
-
-        // Сбрасываем цвет
-        output += "\033[0m";
-
-        // Обрабатываем перенос
-        if (ch == U'\n')
-        {
-            ++row;
-            col = 0;
-        }
-        else
-        {
-            ++col;
-            if (col >= static_cast<size_t>(cols))
-            {
-                ++row;
-                col = 0;
-            }
-        }
-
-        ++idx;
-    }
-
-    // Теперь рисуем оставшийся эталонный текст (серым) — подсказка
-    if (idx < textLen)
-    {
-        // Показываем серым то, что ещё не введено
-        while (row < static_cast<size_t>(rows) && idx < textLen)
-        {
-            char32_t ch = m_text[idx];
-            // Серый цвет (может быть 90m — яркий серый)
-            output += "\033[90m";
-            std::string utf8ch = encodeUtf8(std::u32string(1, ch));
-            output += utf8ch;
-            output += "\033[0m";
-
-            if (ch == U'\n')
-            {
-                ++row;
-                col = 0;
-            }
-            else
-            {
-                ++col;
-                if (col >= static_cast<size_t>(cols))
-                {
-                    ++row;
-                    col = 0;
-                }
-            }
-            ++idx;
-        }
-    }
-
-    // Устанавливаем курсор: после последнего введённого символа
-    // Вычисляем координаты для позиции inputLen
-    size_t cursorRow = 0, cursorCol = 0;
+    size_t cursorRow = 0; // номер строки (0-based) в m_input
+    size_t cursorCol = 0; // позиция в строке
     for (size_t i = 0; i < inputLen; ++i)
     {
-        char32_t ch = m_input[i];
-        if (ch == U'\n')
+        if (m_input[i] == U'\n')
         {
             ++cursorRow;
             cursorCol = 0;
@@ -249,23 +162,142 @@ void Typer::draw()
         else
         {
             ++cursorCol;
-            if (cursorCol >= static_cast<size_t>(cols))
+        }
+    }
+
+    // 2. Определяем, с какой строки начинать отображение (чтобы курсор был внизу)
+    size_t startRow = 0;
+    if (cursorRow >= static_cast<size_t>(screenRows) - 1)
+    {
+        startRow = cursorRow - (screenRows - 2);
+    }
+
+    // 3. Находим индекс в m_input, соответствующий началу строки startRow
+    size_t startIdx = 0;
+    if (startRow > 0)
+    {
+        size_t row = 0;
+        for (size_t i = 0; i < inputLen; ++i)
+        {
+            if (m_input[i] == U'\n')
             {
-                ++cursorRow;
-                cursorCol = 0;
+                ++row;
+                if (row == startRow)
+                {
+                    startIdx = i + 1; // после переноса
+                    break;
+                }
             }
         }
     }
 
-    // Если inputLen == 0, курсор в (0,0)
-    int targetRow = static_cast<int>(cursorRow + 1);
+    // 4. Формируем буфер
+    std::string output;
+    output.reserve(screenRows * (screenCols + 6) + 32);
+    output += "\033[?25l"; // скрыть курсор
+    output += "\033[H\033[J"; // курсор в (1,1), очистить экран
+
+    // 5. Отрисовываем символы, начиная с startIdx, но не более screenRows-1 строк
+    size_t currentRow = 0;
+    size_t currentCol = 0;
+    size_t idx = startIdx;
+    size_t textLen = m_text.size();
+    size_t inputLenLocal = m_input.size();
+    size_t maxLen = std::max(textLen, inputLenLocal);
+
+    // Рисуем реальные символы, пока не кончится текст или не заполним экран (кроме последней строки)
+    while (currentRow < static_cast<size_t>(screenRows - 1) && idx < maxLen)
+    {
+        char32_t ch = 0;
+        bool hasInput = false;
+        bool isCorrect = false;
+
+        if (idx < inputLenLocal)
+        {
+            hasInput = true;
+            ch = m_input[idx];
+            if (idx < textLen && ch == m_text[idx])
+                isCorrect = true;
+        }
+        else if (idx < textLen)
+        {
+            ch = m_text[idx];
+        }
+        else
+        {
+            ch = ' '; // запасной вариант
+        }
+
+        // Выбор цвета
+        if (hasInput && isCorrect)
+        {
+            output += "\033[32m"; // зелёный
+        }
+        else if (hasInput && !isCorrect)
+        {
+            output += "\033[41;37m"; // красный фон, белый текст
+        }
+        else if (idx < textLen)
+        {
+            output += "\033[90m"; // серый (подсказка)
+        }
+        else
+        {
+            output += "\033[0m";
+        }
+
+        // Вывод символа (в UTF-8)
+        output += encodeUtf8(std::u32string(1, ch));
+        output += "\033[0m";
+
+        // Обновляем позицию на экране
+        if (ch == U'\n')
+        {
+            ++currentRow;
+            currentCol = 0;
+        }
+        else
+        {
+            ++currentCol;
+            if (currentCol >= static_cast<size_t>(screenCols))
+            {
+                ++currentRow;
+                currentCol = 0;
+            }
+        }
+
+        ++idx;
+    }
+
+    // 6. Заполняем пробелами оставшиеся строки (кроме последней)
+    while (currentRow < static_cast<size_t>(screenRows - 1))
+    {
+        output += ' ';
+        ++currentCol;
+        if (currentCol >= static_cast<size_t>(screenCols))
+        {
+            ++currentRow;
+            currentCol = 0;
+        }
+    }
+
+    // 7. Устанавливаем курсор на позицию (cursorRow - startRow + 1, cursorCol + 1)
+    int targetRow = static_cast<int>(cursorRow - startRow + 1);
     int targetCol = static_cast<int>(cursorCol + 1);
+    if (targetRow < 1)
+        targetRow = 1;
+    if (targetRow > screenRows)
+        targetRow = screenRows;
+    if (targetCol < 1)
+        targetCol = 1;
+    if (targetCol > screenCols)
+        targetCol = screenCols;
+
     char buf[32];
     snprintf(buf, sizeof(buf), "\033[%d;%dH", targetRow, targetCol);
     output += buf;
 
-    // Показываем курсор
-    output += "\033[?25h";
+    output += "\033[?25h"; // показать курсор
 
     write(STDOUT_FILENO, output.data(), output.size());
 }
@@ -376,25 +408,34 @@ void Typer::run(
     m_totalKeystrokes = 0;
     m_consecutiveCorrect = 0;
     m_maxConsecutiveCorrect = 0;
-    m_totalTimeBetweenKeys = std::chrono::milliseconds{0};
+    m_totalTimeBetweenKeys = std::chrono::milliseconds { 0 };
     m_timeIntervalsCount = 0;
-    m_correctTimeSum = std::chrono::milliseconds{0};
+    m_correctTimeSum = std::chrono::milliseconds { 0 };
     m_correctIntervals = 0;
-    m_errorTimeSum = std::chrono::milliseconds{0};
+    m_errorTimeSum = std::chrono::milliseconds { 0 };
     m_errorIntervals = 0;
     m_lastKeyTime = std::chrono::steady_clock::now();
 
     // 4. Если файл пуст – сразу завершаемся и удаляем прогресс
-    if (m_text.empty()) {
+    if (m_text.empty())
+    {
         // Удаляем запись о прогрессе для этого файла
         json stateJson;
         std::ifstream in(statePath());
-        if (in.is_open()) {
-            try { in >> stateJson; } catch (...) {}
+        if (in.is_open())
+        {
+            try
+            {
+                in >> stateJson;
+            }
+            catch (...)
+            {
+            }
         }
         stateJson.erase(filepath);
         std::ofstream out(statePath());
-        if (out.is_open()) {
+        if (out.is_open())
+        {
             out << stateJson.dump(4);
             out.flush();
         }
@@ -412,13 +453,13 @@ void Typer::run(
     term.enableRaw();
     term.clearScreen();
 
-    bool completed = false;   // флаг, что достигнут конец текста (по количеству символов)
+    bool completed = false; // флаг, что достигнут конец текста (по количеству символов)
 
     while (true)
     {
-        draw();   // отрисовка текущего состояния
+        draw(); // отрисовка текущего состояния
 
-        char32_t ch = term.getChar();   // читаем один UTF-8 символ
+        char32_t ch = term.getChar(); // читаем один UTF-8 символ
 
         // Выход по ESC – сохраняем прогресс
         if (ch == 27)
@@ -427,7 +468,8 @@ void Typer::run(
         // Измеряем время между нажатиями
         auto now = std::chrono::steady_clock::now();
         std::chrono::milliseconds diff(0);
-        if (m_totalKeystrokes > 0) {
+        if (m_totalKeystrokes > 0)
+        {
             diff = std::chrono::duration_cast<std::chrono::milliseconds>(now - m_lastKeyTime);
             m_totalTimeBetweenKeys += diff;
             m_timeIntervalsCount++;
@@ -451,7 +493,8 @@ void Typer::run(
             continue;
 
         // Обычный ввод
-        if (!m_started) {
+        if (!m_started)
+        {
             m_startTime = now;
             m_started = true;
         }
@@ -466,21 +509,26 @@ void Typer::run(
 
         // Обновляем статистику
         m_charPresses[ch]++;
-        if (isCorrect) {
+        if (isCorrect)
+        {
             ++m_correctChars;
             m_charCorrect[ch]++;
             ++m_consecutiveCorrect;
             if (m_consecutiveCorrect > m_maxConsecutiveCorrect)
                 m_maxConsecutiveCorrect = m_consecutiveCorrect;
-            if (diff.count() > 0) {
+            if (diff.count() > 0)
+            {
                 m_correctTimeSum += diff;
                 m_correctIntervals++;
             }
-        } else {
+        }
+        else
+        {
             ++m_errors;
             m_charErrors[ch]++;
             m_consecutiveCorrect = 0;
-            if (diff.count() > 0) {
+            if (diff.count() > 0)
+            {
                 m_errorTimeSum += diff;
                 m_errorIntervals++;
             }
@@ -506,12 +554,20 @@ void Typer::run(
         // Удаляем запись о прогрессе для этого файла – задание выполнено
         json stateJson;
         std::ifstream in(statePath());
-        if (in.is_open()) {
-            try { in >> stateJson; } catch (...) {}
+        if (in.is_open())
+        {
+            try
+            {
+                in >> stateJson;
+            }
+            catch (...)
+            {
+            }
         }
         stateJson.erase(filepath);
         std::ofstream out(statePath());
-        if (out.is_open()) {
+        if (out.is_open())
+        {
             out << stateJson.dump(4);
             out.flush();
         }
