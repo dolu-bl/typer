@@ -18,8 +18,12 @@ find_package(nlohmann_json REQUIRED)
 
 set(SOURCES
     ${CMAKE_CURRENT_SOURCE_DIR}/src/main.cpp
-    ${CMAKE_CURRENT_SOURCE_DIR}/src/typer.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/renderer.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/session_manager.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/stats_collector.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/src/terminal.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/typer.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/utf8_utils.cpp
 )
 
 add_executable(${PROJECT_NAME} ${SOURCES})

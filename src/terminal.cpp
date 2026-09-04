@@ -3,7 +3,7 @@
 #include <sys/ioctl.h>
 #include <unistd.h>
 
-#include "terminal.hpp"
+#include "terminal.h"
 
 Terminal::Terminal()
 {

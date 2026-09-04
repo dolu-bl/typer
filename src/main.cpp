@@ -4,7 +4,7 @@
 
 #include <boost/program_options.hpp>
 
-#include "typer.hpp"
+#include "typer.h"
 
 namespace po = boost::program_options;
 
