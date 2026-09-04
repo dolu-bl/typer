@@ -349,7 +349,6 @@ void Typer::printStats() const
     std::cout << "===============================\n";
 }
 
-// -------- Основной цикл --------
 void Typer::run(
     const std::string& filepath,
     const std::string& utf8Content,
@@ -357,23 +356,16 @@ void Typer::run(
     bool reset
 )
 {
-    // Декодируем эталонный текст
+    // 1. Декодируем эталонный текст (UTF-8 -> UTF-32)
     m_text = decodeUtf8(utf8Content);
 
-    // Загружаем сохранённый ввод, если не сброс
+    // 2. Загружаем сохранённый прогресс, если не запрошен сброс
     if (!reset)
-    {
         loadState(filepath, m_input);
-    }
     else
-    {
         m_input.clear();
-    }
 
-    // Если передан savedInput (например, из командной строки?) не используется сейчас.
-    // Но можем использовать его, если хотим, но мы загружаем из файла.
-
-    // Сброс статистики
+    // 3. Сбрасываем всю статистику (как в исходном коде)
     m_correctChars = 0;
     m_errors = 0;
     m_started = false;
@@ -384,31 +376,58 @@ void Typer::run(
     m_totalKeystrokes = 0;
     m_consecutiveCorrect = 0;
     m_maxConsecutiveCorrect = 0;
-    m_totalTimeBetweenKeys = std::chrono::milliseconds { 0 };
+    m_totalTimeBetweenKeys = std::chrono::milliseconds{0};
     m_timeIntervalsCount = 0;
-    m_correctTimeSum = std::chrono::milliseconds { 0 };
+    m_correctTimeSum = std::chrono::milliseconds{0};
     m_correctIntervals = 0;
-    m_errorTimeSum = std::chrono::milliseconds { 0 };
+    m_errorTimeSum = std::chrono::milliseconds{0};
     m_errorIntervals = 0;
     m_lastKeyTime = std::chrono::steady_clock::now();
 
+    // 4. Если файл пуст – сразу завершаемся и удаляем прогресс
+    if (m_text.empty()) {
+        // Удаляем запись о прогрессе для этого файла
+        json stateJson;
+        std::ifstream in(statePath());
+        if (in.is_open()) {
+            try { in >> stateJson; } catch (...) {}
+        }
+        stateJson.erase(filepath);
+        std::ofstream out(statePath());
+        if (out.is_open()) {
+            out << stateJson.dump(4);
+            out.flush();
+        }
+        term.disableRaw();
+        term.clearScreen();
+        std::cout << "\033[H";
+        std::cout << "Файл пуст. Прогресс сброшен.\n\n";
+        printStats();
+        std::cout.flush();
+        savedInput = encodeUtf8(m_input);
+        return;
+    }
+
+    // 5. Включаем raw-режим и очищаем экран
     term.enableRaw();
     term.clearScreen();
 
+    bool completed = false;   // флаг, что достигнут конец текста (по количеству символов)
+
     while (true)
     {
-        draw();
+        draw();   // отрисовка текущего состояния
 
-        char32_t ch = term.getChar();
+        char32_t ch = term.getChar();   // читаем один UTF-8 символ
 
-        if (ch == 27) // ESC
+        // Выход по ESC – сохраняем прогресс
+        if (ch == 27)
             break;
 
-        // Измеряем время
+        // Измеряем время между нажатиями
         auto now = std::chrono::steady_clock::now();
         std::chrono::milliseconds diff(0);
-        if (m_totalKeystrokes > 0)
-        {
+        if (m_totalKeystrokes > 0) {
             diff = std::chrono::duration_cast<std::chrono::milliseconds>(now - m_lastKeyTime);
             m_totalTimeBetweenKeys += diff;
             m_timeIntervalsCount++;
@@ -416,72 +435,99 @@ void Typer::run(
         m_lastKeyTime = now;
         ++m_totalKeystrokes;
 
+        // Обработка Backspace – всегда разрешена
         if (ch == 127 || ch == '\b')
         {
             ++m_backspaces;
             if (!m_input.empty())
-            {
-                // Удаляем последний символ
                 m_input.pop_back();
-            }
             continue;
         }
 
+        // === ОГРАНИЧЕНИЕ: не позволяем вводить больше символов, чем в эталоне ===
+        // Если уже достигли или превысили длину эталона – игнорируем нажатие.
+        // (Пользователь может удалить лишние символы Backspace'ом.)
+        if (m_input.size() >= m_text.size())
+            continue;
+
         // Обычный ввод
-        if (!m_started)
-        {
+        if (!m_started) {
             m_startTime = now;
             m_started = true;
         }
 
-        // Добавляем символ в буфер
         m_input.push_back(ch);
 
-        // Определяем, правильный ли он
         size_t inputPos = m_input.size() - 1;
         bool isCorrect = (inputPos < m_text.size() && ch == m_text[inputPos]);
-        // Если позиция выходит за эталон — это ошибка
+        // (inputPos всегда < m_text.size(), так как мы ограничили выше, но на всякий случай)
         if (inputPos >= m_text.size())
             isCorrect = false;
 
         // Обновляем статистику
         m_charPresses[ch]++;
-        if (isCorrect)
-        {
+        if (isCorrect) {
             ++m_correctChars;
             m_charCorrect[ch]++;
             ++m_consecutiveCorrect;
             if (m_consecutiveCorrect > m_maxConsecutiveCorrect)
                 m_maxConsecutiveCorrect = m_consecutiveCorrect;
-            if (diff.count() > 0)
-            {
+            if (diff.count() > 0) {
                 m_correctTimeSum += diff;
                 m_correctIntervals++;
             }
-        }
-        else
-        {
+        } else {
             ++m_errors;
             m_charErrors[ch]++;
             m_consecutiveCorrect = 0;
-            if (diff.count() > 0)
-            {
+            if (diff.count() > 0) {
                 m_errorTimeSum += diff;
                 m_errorIntervals++;
             }
         }
+
+        // === ПРОВЕРКА ЗАВЕРШЕНИЯ ===
+        // Как только количество введённых символов достигло длины эталона – выходим.
+        if (m_input.size() == m_text.size())
+        {
+            completed = true;
+            break;
+        }
     }
 
-    // Сохраняем прогресс
-    saveState(filepath, m_input);
-    // Возвращаем введённый текст через savedInput (на всякий случай, если вызывающий хочет его использовать)
-    savedInput = encodeUtf8(m_input);
-
+    // 6. Восстанавливаем терминал
     term.disableRaw();
     term.clearScreen();
     std::cout << "\033[H";
 
-    std::cout << "Прогресс сохранён. Введено символов: " << m_input.size() << "\n\n";
+    // 7. Сохраняем или удаляем прогресс
+    if (completed)
+    {
+        // Удаляем запись о прогрессе для этого файла – задание выполнено
+        json stateJson;
+        std::ifstream in(statePath());
+        if (in.is_open()) {
+            try { in >> stateJson; } catch (...) {}
+        }
+        stateJson.erase(filepath);
+        std::ofstream out(statePath());
+        if (out.is_open()) {
+            out << stateJson.dump(4);
+            out.flush();
+        }
+        std::cout << "Поздравляем! Вы ввели все символы текста. Прогресс сброшен.\n";
+    }
+    else
+    {
+        // Выход по ESC – сохраняем прогресс
+        saveState(filepath, m_input);
+        std::cout << "Прогресс сохранён. Введено символов: " << m_input.size() << "\n";
+    }
+
+    std::cout << "\n";
     printStats();
     std::cout.flush();
+
+    // Сохраняем введённый текст в выходной параметр (на случай, если вызывающий захочет его использовать)
+    savedInput = encodeUtf8(m_input);
 }
